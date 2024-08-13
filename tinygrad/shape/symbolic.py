@@ -22,11 +22,9 @@ class Node:
 
   @functools.cached_property
   def key(self) -> str: return self.render(ctx="DEBUG")
-  @functools.cached_property
-  def hash(self) -> int: return hash(self.key)
   def __repr__(self): return self.render(ctx="REPR")
   def __str__(self): return "<"+self.key+">"
-  def __hash__(self): return self.hash
+  def __hash__(self): return hash(self.key)
   def __bool__(self): return not (self.max == self.min == 0)
   def __eq__(self, other:object) -> bool:
     if not isinstance(other, Node): return NotImplemented
@@ -45,18 +43,19 @@ class Node:
     if b == 1: return self
     return create_node(MulNode(self, b.b)) if isinstance(b, NumNode) else create_node(MulNode(self, b))
   def __rmul__(self, b:int): return self*b
+  def __lshift__(self, b:int): return self*2**b
 
   # *** complex ops ***
 
   def __rfloordiv__(self, b:int): return NumNode(b) // self
   def __floordiv__(self, b:Union[Node,int], factoring_allowed=True):
     if isinstance(b, Node):
-      if b.__class__ is NumNode: return self // b.b
+      if b.__class__ is NumNode: return self.__floordiv__(b.b, factoring_allowed)
       if self == b: return NumNode(1)
       if (b - self).min > 0 and self.min >= 0: return NumNode(0) # b - self simplifies the node
       raise RuntimeError(f"not supported: {self} // {b}")
     assert b != 0
-    if b < 0: return (self*-1)//-b
+    if b < 0: return (self*-1).__floordiv__(-b, factoring_allowed)
     if b == 1: return self
 
     # the numerator of div is not allowed to be negative
@@ -76,7 +75,6 @@ class Node:
     assert b > 0
     if b == 1: return NumNode(0)
     if isinstance(self.max, int) and isinstance(self.min, int):
-      if self.min >= 0 and self.max < b: return self
       if (self.min//b) == (self.max//b): return self - (b*(self.min//b))
       if self.min < 0: return (self - ((self.min//b)*b)) % b
     return create_node(ModNode(self, b))
@@ -233,7 +231,7 @@ class RedNode(Node):
   def __init__(self, nodes:List[Node]):
     self.nodes = nodes
     self.min, self.max = self.get_bounds()
-  def vars(self) -> Set[Variable]: return set.union(*[x.vars() for x in self.nodes], set())
+  def vars(self) -> Set[Variable]: return set().union(*[x.vars() for x in self.nodes])
   def get_bounds(self) -> Tuple[int, sint]: raise NotImplementedError("must be implemented")
 
 class SumNode(RedNode):
@@ -257,12 +255,15 @@ class SumNode(RedNode):
     divisor = 1
     for x in self.flat_components:
       if x.__class__ in (NumNode, MulNode):
-        if x.b%b == 0: fully_divided.append(x//b)
+        if x.b % b == 0: fully_divided.append(x // b)
         else:
+          if x.__class__ is NumNode and (div := x.b // b):
+            fully_divided.append(NumNode(div))
+            x = NumNode(x.b - b * div)
           rest.append(x)
           if isinstance(x.b, int):
             _gcd = gcd(_gcd, x.b)
-            if x.__class__ == MulNode and divisor == 1 and b%x.b == 0: divisor = x.b
+            if x.__class__ == MulNode and divisor == 1 and b % x.b == 0: divisor = x.b
           else:
             _gcd = 1
       else:
@@ -290,16 +291,12 @@ class SumNode(RedNode):
 class AndNode(RedNode):
   def get_bounds(self) -> Tuple[int, sint]: return min([x.min for x in self.nodes]), max([x.max for x in self.nodes])
   def substitute(self, var_vals: Mapping[Variable, Union[NumNode, Variable]]) -> Node:
-    subed = []
-    for node in self.nodes:
-      if not (sub:=node.substitute(var_vals)): return NumNode(0)
-      subed.append(sub)
-    return Node.ands(subed)
+    return Node.ands([node.substitute(var_vals) for node in self.nodes])
 
 def sym_render(a: Union[Node, int], ops=None, ctx=None) -> str: return str(a) if isinstance(a, int) else a.render(ops, ctx)
-def sym_infer(a: Union[Node, int], var_vals: Dict[Variable, int]) -> int:
+def sym_infer(a: Union[Node, int], var_vals: Optional[Dict[Variable, int]]) -> int:
   if isinstance(a, (int, float)): return a
-  ret = a.substitute({k:NumNode(v) for k, v in var_vals.items()})
+  ret = a.substitute({k:NumNode(v) for k, v in var_vals.items()}) if var_vals is not None else a
   assert isinstance(ret, NumNode), f"sym_infer didn't produce NumNode from {a} with {var_vals}"
   return ret.b
 
